@@ -1,0 +1,62 @@
+---
+ - name: Detect Raspberry Pi hardware
+   become: false
+   ansible.builtin.slurp:
+     src: /proc/device-tree/model
+   register: rpi_model
+   changed_when: false
+   failed_when: false
+
+ - name: Set Raspberry Pi detection fact
+   ansible.builtin.set_fact:
+     rpi_is_pi: "{{ (rpi_model.content | default('') | b64decode) is search('Raspberry Pi') }}"
+   changed_when: false
+
+ - name: Expand root filesystem on RedHat family using rootfs-expand
+   become: true
+   when: ansible_os_family == 'RedHat'
+   block:
+     - name: Check if rootfs-expand command exists
+       ansible.builtin.command: command -v rootfs-expand
+       register: rootfs_expand_cmd
+       changed_when: false
+       failed_when: false
+
+     - name: Log skip when rootfs-expand is not available
+       ansible.builtin.debug:
+         msg: "rootfs-expand not found; skipping expansion on RedHat."
+       when: rootfs_expand_cmd.rc != 0
+
+     - name: Run rootfs-expand
+       ansible.builtin.command: rootfs-expand
+       register: rootfs_expand_result
+       changed_when: true
+       when: rootfs_expand_cmd.rc == 0
+
+ - name: Expand root filesystem on Raspberry Pi OS using raspi-config
+   become: true
+   when: ansible_os_family == 'Debian' and (rpi_is_pi | default(false))
+   block:
+     - name: Check for raspi-config presence
+       ansible.builtin.command: command -v raspi-config
+       register: raspi_config_cmd
+       changed_when: false
+       failed_when: false
+
+     - name: Attempt non-interactive expand via raspi-config
+       ansible.builtin.command: raspi-config nonint do_expand_rootfs
+       register: rpi_expand_nonint
+       changed_when: true
+       failed_when: false
+       when: raspi_config_cmd.rc == 0
+
+     - name: Fallback to legacy raspi-config expand-rootfs
+       ansible.builtin.command: raspi-config --expand-rootfs
+       when: raspi_config_cmd.rc == 0 and rpi_expand_nonint.rc != 0
+       register: rpi_expand_legacy
+       changed_when: true
+
+     - name: Reboot after expanding rootfs if requested
+       ansible.builtin.reboot:
+         reboot_timeout: 600
+       when: extendfs_reboot | default(false)
